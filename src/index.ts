@@ -1,11 +1,19 @@
 #!/usr/bin/env node
-
 import { runAcp } from "./agy-agent.js";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 if (process.argv.includes("--version") || process.argv.includes("-v")) {
-  console.log("0.1.0");
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, "../package.json"), "utf-8"));
+    process.stdout.write(`${pkg.version}\n`);
+  } catch {
+    process.stdout.write("0.1.1\n");
+  }
   process.exit(0);
 }
 
