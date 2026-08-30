@@ -116,7 +116,8 @@ export class AgyProcess {
     this.child.on("exit", (code: number | null, signal: string | null) => {
       this.logger?.log(`[AgyProcess] Child exited with code ${code}, signal ${signal}`);
       if (this.currentTurnResolve && !this.isKilled) {
-        this.currentTurnResolve("end_turn");
+        const stopReason = signal === "SIGINT" ? "cancelled" : "end_turn";
+        this.currentTurnResolve(stopReason);
         this.currentTurnResolve = null;
         this.currentTurnReject = null;
       }
@@ -127,7 +128,9 @@ export class AgyProcess {
 
   private async handleLine(line: string): Promise<void> {
     const trimmed = line.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      return;
+    }
 
     let event: AgyEvent;
     try {
@@ -203,15 +206,18 @@ export class AgyProcess {
   }
 
   public cancel(): void {
+    const resolve = this.currentTurnResolve;
+    this.currentTurnResolve = null;
+    this.currentTurnReject = null;
+    this.currentTurnCallbacks = null;
+
     if (this.child && !this.child.killed) {
       this.logger?.log("[AgyProcess] Cancelling active turn via SIGINT");
       this.child.kill("SIGINT");
     }
-    if (this.currentTurnResolve) {
-      this.currentTurnResolve("cancelled");
-      this.currentTurnResolve = null;
-      this.currentTurnReject = null;
-      this.currentTurnCallbacks = null;
+
+    if (resolve) {
+      resolve("cancelled");
     }
   }
 

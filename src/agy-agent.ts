@@ -39,17 +39,25 @@ export class AgyAcpAgent {
   }
 
   public async initialize(params: InitializeRequest): Promise<InitializeResponse> {
-    this.logger?.log("[AgyAcpAgent] Initialize called with capabilities:", params.clientCapabilities);
+    this.logger?.log("[AgyAcpAgent] Initialize called with params:", params);
     return {
       protocolVersion: 2,
+      capabilities: {
+        loadSession: false,
+      },
+      info: {
+        name: "agy-agent-acp",
+        version: "0.1.1",
+      },
+      // Backward-compatible fields
       agentCapabilities: {
         loadSession: false,
       },
       agentInfo: {
         name: "agy-agent-acp",
-        version: "0.1.0",
+        version: "0.1.1",
       },
-    };
+    } as unknown as InitializeResponse;
   }
 
   public async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
@@ -92,7 +100,9 @@ export class AgyAcpAgent {
 
     const rawText = params.prompt
       .map((block) => {
-        if (block.type === "text") return block.text;
+        if (block.type === "text") {
+          return block.text;
+        }
         return "";
       })
       .filter(Boolean)
@@ -107,7 +117,7 @@ export class AgyAcpAgent {
     this.logger?.log(`[AgyAcpAgent] Sending prompt to agy (length: ${fullPrompt.length})`);
 
     const stopReasonStr = await session.process.sendPrompt(fullPrompt, {
-      onTextDelta: async (text: string) => {
+      onTextDelta: async (text: string): Promise<void> => {
         await this.client.notify(methods.client.session.update, {
           sessionId: params.sessionId,
           update: {
@@ -116,10 +126,10 @@ export class AgyAcpAgent {
               type: "text",
               text,
             },
-          } as any,
-        });
+          },
+        } as unknown as Parameters<AgentContext["notify"]>[1]);
       },
-      onToolCall: async (toolName: string, toolParams: unknown) => {
+      onToolCall: async (toolName: string, toolParams: unknown): Promise<void> => {
         this.logger?.log(`[AgyAcpAgent] Tool call: ${toolName}`);
         await this.client.notify(methods.client.session.update, {
           sessionId: params.sessionId,
@@ -128,10 +138,10 @@ export class AgyAcpAgent {
             title: toolName,
             kind: "tool",
             toolInput: toolParams,
-          } as any,
-        });
+          },
+        } as unknown as Parameters<AgentContext["notify"]>[1]);
       },
-      onUsage: async (usage) => {
+      onUsage: async (usage): Promise<void> => {
         await this.client.notify(methods.client.session.update, {
           sessionId: params.sessionId,
           update: {
@@ -141,8 +151,8 @@ export class AgyAcpAgent {
               outputTokens: usage.output_tokens ?? 0,
               totalTokens: usage.total_tokens ?? 0,
             },
-          } as any,
-        });
+          },
+        } as unknown as Parameters<AgentContext["notify"]>[1]);
       },
     });
 
@@ -182,22 +192,25 @@ export class AgyAcpAgent {
   }
 }
 
-export function runAcp(logger?: Logger) {
+export function runAcp(logger?: Logger): {
+  connection: ReturnType<ReturnType<typeof acpAgent>["connect"]>;
+  agent: AgyAcpAgent;
+} {
   const input = nodeToWebWritable(process.stdout);
   const output = nodeToWebReadable(process.stdin);
   const stream = ndJsonStream(input, output);
 
-  let agent: AgyAcpAgent;
+  let agentInstance: AgyAcpAgent | undefined = undefined;
   const connection = acpAgent({ name: "agy-agent-acp" })
-    .onRequest(methods.agent.initialize, (ctx) => agent.initialize(ctx.params))
-    .onRequest(methods.agent.session.new, (ctx) => agent.newSession(ctx.params))
-    .onRequest(methods.agent.session.prompt, (ctx) => agent.prompt(ctx.params))
-    .onRequest(methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
-    .onRequest(methods.agent.session.delete, (ctx) => agent.deleteSession(ctx.params))
-    .onNotification(methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
+    .onRequest(methods.agent.initialize, (ctx) => agentInstance!.initialize(ctx.params))
+    .onRequest(methods.agent.session.new, (ctx) => agentInstance!.newSession(ctx.params))
+    .onRequest(methods.agent.session.prompt, (ctx) => agentInstance!.prompt(ctx.params))
+    .onRequest(methods.agent.session.close, (ctx) => agentInstance!.closeSession(ctx.params))
+    .onRequest(methods.agent.session.delete, (ctx) => agentInstance!.deleteSession(ctx.params))
+    .onNotification(methods.agent.session.cancel, (ctx) => agentInstance!.cancel(ctx.params))
     .connect(stream);
 
-  agent = new AgyAcpAgent(connection.client, logger);
+  agentInstance = new AgyAcpAgent(connection.client, logger);
 
-  return { connection, agent };
+  return { connection, agent: agentInstance };
 }

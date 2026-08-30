@@ -18,10 +18,12 @@ if (process.argv.includes("--version") || process.argv.includes("-v")) {
 }
 
 // Redirect all standard console logging to stderr to prevent corrupting ACP JSON-RPC on stdout
+/* eslint-disable no-console */
 console.log = console.error;
 console.info = console.error;
 console.warn = console.error;
 console.debug = console.error;
+/* eslint-enable no-console */
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("[agy-agent-acp] Unhandled Rejection at:", promise, "reason:", reason);

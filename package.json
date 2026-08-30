@@ -1,6 +1,6 @@
 {
   "name": "agy-agent-acp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agent Client Protocol (ACP) adapter for Google Antigravity CLI (agy)",
   "main": "dist/index.js",
   "type": "module",
@@ -14,9 +14,21 @@
   ],
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests",
+    "lint:fix": "eslint src tests --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "start": "node dist/index.js",
     "dev": "tsc -w",
-    "prepublishOnly": "npm run build"
+    "prepare": "husky",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm run test && npm run build"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix"
+    ]
   },
   "keywords": [
     "acp",
@@ -44,6 +56,13 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.6.0"
+    "@typescript-eslint/eslint-plugin": "^8.68.0",
+    "@typescript-eslint/parser": "^8.68.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "eslint": "^10.9.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.4.1",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.11"
   }
 }
