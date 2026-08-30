@@ -20,11 +20,9 @@
 
 ## 🌟 Overview
 
-**`agy-agent-acp`** is a high-performance, standard-compliant [Agent Client Protocol (ACP)](https://agentclientprotocol.org) adapter designed for **Google Antigravity CLI (`agy`)**.
+**`agy-agent-acp`** is an [Agent Client Protocol (ACP)](https://agentclientprotocol.org) adapter for **Google Antigravity CLI (`agy`)**.
 
-While Google Antigravity provides state-of-the-art agentic AI coding capabilities, headless orchestration platforms (such as decentralized Nostr relays, CI/CD runners, chat bots, and multi-agent coordination hubs) communicate using standard JSON-RPC 2.0 ACP over `stdio`. 
-
-`agy-agent-acp` bridges this gap: it receives ACP requests, manages the `agy` subprocess lifecycle in high-speed streaming mode (`--input-format stream-json --output-format stream-json`), and translates real-time reasoning deltas, tool executions, and usage telemetry back into standard ACP notification streams.
+It bridges headless orchestrators (relays, bots, multi-agent frameworks) with `agy` over `stdio` JSON-RPC, streaming reasoning deltas, tool calls, and token usage in real time.
 
 ---
 
