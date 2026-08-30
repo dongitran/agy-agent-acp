@@ -9,7 +9,6 @@
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg?style=flat-square)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Protocol: ACP](https://img.shields.io/badge/Protocol-ACP%20(JSON--RPC%202.0)-purple?style=flat-square)](https://agentclientprotocol.org)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/dongitran/agy-agent-acp/pulls)
 
 <p align="center">
   Bridge Google Antigravity CLI's native reasoning engine with any headless agent orchestration harness over standard Agent Client Protocol (ACP).
@@ -207,33 +206,6 @@ ENTRYPOINT ["agy-agent-acp"]
 
 ---
 
-## 🛠 Development & Testing
-
-```bash
-# Run compiler in watch mode
-npm run dev
-
-# Run linter
-npm run lint
-
-# Build production bundle
-npm run build
-```
-
----
-
-## 🤝 Contributing
-
-Contributions, issues, and feature requests are welcome!
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'feat: add AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
 ## 📄 License
 
 Distributed under the **MIT License**. See [`LICENSE`](./LICENSE) for more information.
@@ -243,3 +215,4 @@ Distributed under the **MIT License**. See [`LICENSE`](./LICENSE) for more infor
 <div align="center">
   <sub>Built with ❤️ by <a href="https://github.com/dongitran">@dongitran</a> for the Decentralized Agentic AI Ecosystem.</sub>
 </div>
+
