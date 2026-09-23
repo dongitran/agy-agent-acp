@@ -80,6 +80,67 @@ describe("AgyAcpAgent Module", () => {
       expect(fs.readFileSync).toHaveBeenCalledWith("/path/to/prompt.md", "utf8");
       expect(res.sessionId).toBeDefined();
     });
+
+    it("should load incoming system prompt from params.systemPrompt", async () => {
+      const agent = new AgyAcpAgent(mockClient as any, loggerMock);
+      const res = await agent.newSession({
+        cwd: "/workspace",
+        systemPrompt: "You are CoreCoder, use buzz messages send",
+      } as any);
+
+      expect(res.sessionId).toBeDefined();
+      const session = (agent as any).sessions.get(res.sessionId);
+      expect(session.systemPrompt).toBe("You are CoreCoder, use buzz messages send");
+    });
+
+    it("should load incoming system prompt from params._meta.systemPrompt.append", async () => {
+      const agent = new AgyAcpAgent(mockClient as any, loggerMock);
+      const res = await agent.newSession({
+        cwd: "/workspace",
+        _meta: {
+          systemPrompt: {
+            append: "Instruction via ClaudeMeta format",
+          },
+        },
+      } as any);
+
+      expect(res.sessionId).toBeDefined();
+      const session = (agent as any).sessions.get(res.sessionId);
+      expect(session.systemPrompt).toBe("Instruction via ClaudeMeta format");
+    });
+
+    it("should merge incoming system prompt with file prompt without duplication", async () => {
+      process.env.BUZZ_ACP_SYSTEM_PROMPT_FILE = "/path/to/prompt.md";
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue("Base instructions from file.");
+
+      const agent = new AgyAcpAgent(mockClient as any, loggerMock);
+      const res = await agent.newSession({
+        cwd: "/workspace",
+        systemPrompt: "Extra channel instructions.",
+      } as any);
+
+      const session = (agent as any).sessions.get(res.sessionId);
+      expect(session.systemPrompt).toBe("Base instructions from file.\n\nExtra channel instructions.");
+    });
+
+    it("should reset isFirstPrompt when agy process exits", async () => {
+      const agent = new AgyAcpAgent(mockClient as any, loggerMock);
+      const res = await agent.newSession({
+        cwd: "/workspace",
+        systemPrompt: "Persistent instructions",
+      } as any);
+
+      const session = (agent as any).sessions.get(res.sessionId);
+      expect(session.isFirstPrompt).toBe(true);
+
+      // Simulate a turn that marks isFirstPrompt = false
+      session.isFirstPrompt = false;
+
+      // When the child process exits, onExit resets isFirstPrompt = true
+      session.process.onExit();
+      expect(session.isFirstPrompt).toBe(true);
+    });
   });
 
   describe("prompt", () => {

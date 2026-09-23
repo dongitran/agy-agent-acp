@@ -268,4 +268,40 @@ describe("AgyProcess Module", () => {
 
     await expect(promptPromise).rejects.toThrow("Spawn failure");
   });
+
+  it("should emit onTextDelta if text was not streamed but provided in result.response", async () => {
+    const agy = new AgyProcess("/test/workspace", loggerMock);
+    const deltas: string[] = [];
+    const promptPromise = agy.sendPrompt("Task with response in result", {
+      onTextDelta: (text) => {
+        deltas.push(text);
+      },
+    });
+
+    // Simulate completion with response in result event and no prior text_delta
+    mockChild.stdout.write(
+      JSON.stringify({
+        event: "result",
+        result: {
+          status: "SUCCESS",
+          response: "Final completion response from agy",
+        },
+      }) + "\n"
+    );
+
+    const stopReason = await promptPromise;
+    expect(stopReason).toBe("end_turn");
+    expect(deltas).toEqual(["Final completion response from agy"]);
+  });
+
+  it("should invoke onExit callback when child process exits", () => {
+    const agy = new AgyProcess("/test/workspace", loggerMock);
+    const onExitSpy = vi.fn();
+    agy.onExit = onExitSpy;
+
+    agy.start();
+    mockChild.emit("exit", 0, "SIGTERM");
+
+    expect(onExitSpy).toHaveBeenCalledTimes(1);
+  });
 });
