@@ -47,7 +47,7 @@ export class AgyAcpAgent {
       },
       info: {
         name: "agy-agent-acp",
-        version: "0.1.1",
+        version: "0.1.3",
       },
       // Backward-compatible fields
       agentCapabilities: {
@@ -55,7 +55,7 @@ export class AgyAcpAgent {
       },
       agentInfo: {
         name: "agy-agent-acp",
-        version: "0.1.1",
+        version: "0.1.3",
       },
     } as unknown as InitializeResponse;
   }
@@ -78,13 +78,43 @@ export class AgyAcpAgent {
     }
 
     const agyProc = new AgyProcess(cwd, this.logger);
-    this.sessions.set(sessionId, {
+
+    // ACP protocol & buzz-acp system prompt support:
+    // Extract incoming system prompt from top-level params.systemPrompt or _meta.systemPrompt
+    const pAny = params as unknown as Record<string, unknown>;
+    const metaObj = pAny._meta as Record<string, unknown> | undefined;
+    const metaSystemPrompt = metaObj?.systemPrompt;
+    const incomingPrompt =
+      (typeof pAny.systemPrompt === "string" && pAny.systemPrompt) ||
+      (typeof metaSystemPrompt === "string" && metaSystemPrompt) ||
+      (typeof (metaSystemPrompt as Record<string, unknown>)?.append === "string" &&
+        (metaSystemPrompt as Record<string, unknown>).append as string) ||
+      undefined;
+
+    if (incomingPrompt) {
+      this.logger?.log(`[AgyAcpAgent] Loaded system prompt from ACP params (${incomingPrompt.length} chars)`);
+      if (!systemPrompt) {
+        systemPrompt = incomingPrompt;
+      } else if (!incomingPrompt.includes(systemPrompt)) {
+        systemPrompt = `${systemPrompt}\n\n${incomingPrompt}`;
+      } else {
+        systemPrompt = incomingPrompt;
+      }
+    }
+
+    const sessionData: SessionData = {
       sessionId,
       cwd,
       process: agyProc,
       isFirstPrompt: true,
       systemPrompt,
-    });
+    };
+
+    agyProc.onExit = () => {
+      sessionData.isFirstPrompt = true;
+    };
+
+    this.sessions.set(sessionId, sessionData);
 
     return {
       sessionId,

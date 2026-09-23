@@ -64,6 +64,8 @@ export class AgyProcess {
   private currentTurnReject: ((err: Error) => void) | null = null;
   private currentTurnCallbacks: TurnCallbacks | null = null;
   private isKilled = false;
+  private hasEmittedTextThisTurn = false;
+  public onExit?: () => void;
 
   constructor(cwd: string, logger?: Logger) {
     this.cwd = cwd;
@@ -123,6 +125,7 @@ export class AgyProcess {
       }
       this.child = null;
       this.rl = null;
+      this.onExit?.();
     });
   }
 
@@ -146,6 +149,7 @@ export class AgyProcess {
     } else if (event.event === "step_update" && event.step_update) {
       const step = event.step_update;
       if (step.step_type === "agent_response" && step.text_delta) {
+        this.hasEmittedTextThisTurn = true;
         if (this.currentTurnCallbacks?.onTextDelta) {
           await this.currentTurnCallbacks.onTextDelta(step.text_delta);
         }
@@ -161,13 +165,22 @@ export class AgyProcess {
     } else if (event.event === "result" && event.result) {
       const res = event.result;
       this.logger?.log(`[AgyProcess] Result event: status=${res.status}`);
+      if (res.error) {
+        this.logger?.error(`[AgyProcess] Result error: ${res.error}`);
+      }
+
+      // If text was not streamed via text_delta but arrived in res.response, deliver it
+      if (!this.hasEmittedTextThisTurn && res.response && this.currentTurnCallbacks?.onTextDelta) {
+        this.logger?.log(`[AgyProcess] Emitting response from result event (${res.response.length} chars)`);
+        await this.currentTurnCallbacks.onTextDelta(res.response);
+      }
 
       if (res.usage && this.currentTurnCallbacks?.onUsage) {
         await this.currentTurnCallbacks.onUsage(res.usage);
       }
 
       if (this.currentTurnResolve) {
-        const stopReason = res.status === "SUCCESS" ? "end_turn" : "end_turn";
+        const stopReason = res.status === "CANCELLED" ? "cancelled" : "end_turn";
         this.currentTurnResolve(stopReason);
         this.currentTurnResolve = null;
         this.currentTurnReject = null;
@@ -177,6 +190,7 @@ export class AgyProcess {
   }
 
   public async sendPrompt(prompt: string, callbacks: TurnCallbacks): Promise<string> {
+    this.hasEmittedTextThisTurn = false;
     this.start();
 
     if (!this.child || !this.child.stdin) {

@@ -12,7 +12,7 @@ if (process.argv.includes("--version") || process.argv.includes("-v")) {
     const pkg = JSON.parse(readFileSync(join(__dirname, "../package.json"), "utf-8"));
     process.stdout.write(`${pkg.version}\n`);
   } catch {
-    process.stdout.write("0.1.1\n");
+    process.stdout.write("0.1.3\n");
   }
   process.exit(0);
 }
