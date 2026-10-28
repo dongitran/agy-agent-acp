@@ -14,11 +14,12 @@ import {
   CloseSessionResponse,
   DeleteSessionRequest,
   DeleteSessionResponse,
+  RequestError,
 } from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { AgyProcess } from "./agy-process.js";
-import { Logger, nodeToWebReadable, nodeToWebWritable } from "./utils.js";
+import { AgyProcess, AgyRunError } from "./agy-process.js";
+import { Logger, nodeToWebReadable, nodeToWebWritable, sleep } from "./utils.js";
 
 interface SessionData {
   sessionId: string;
@@ -26,6 +27,33 @@ interface SessionData {
   process: AgyProcess;
   isFirstPrompt: boolean;
   systemPrompt?: string;
+  /** Set by cancel(); a prompt waiting to retry a sign-in stops instead. */
+  cancelRequested: boolean;
+}
+
+/** JSON-RPC code of a failed turn: an implementation-defined server error, which ACP clients pass on with its message. */
+const AGY_FAILED_TURN_CODE = -32000;
+
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  const value = Number(raw);
+  return Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback;
+}
+
+/**
+ * How often a turn whose agy could not finish its sign-in is run again on a fresh agy, and the first wait before it
+ * (doubled for each further retry). agy's own sign-in limit is a fixed 10 seconds; the refresh it was waiting for
+ * often lands just after it, so a second agy a few seconds later usually starts at once. Retried only when agy reported
+ * nothing for the turn, so nothing the agent did can run twice.
+ */
+export function signInRetryPolicy(): { retries: number; firstDelayMs: number } {
+  return {
+    retries: envInt("AGY_ACP_SIGNIN_RETRIES", 2, 0, 5),
+    firstDelayMs: envInt("AGY_ACP_SIGNIN_RETRY_DELAY_MS", 2000, 0, 30000),
+  };
 }
 
 export class AgyAcpAgent {
@@ -47,7 +75,7 @@ export class AgyAcpAgent {
       },
       info: {
         name: "agy-agent-acp",
-        version: "0.1.3",
+        version: "0.1.4",
       },
       // Backward-compatible fields
       agentCapabilities: {
@@ -55,7 +83,7 @@ export class AgyAcpAgent {
       },
       agentInfo: {
         name: "agy-agent-acp",
-        version: "0.1.3",
+        version: "0.1.4",
       },
     } as unknown as InitializeResponse;
   }
@@ -108,6 +136,7 @@ export class AgyAcpAgent {
       process: agyProc,
       isFirstPrompt: true,
       systemPrompt,
+      cancelRequested: false,
     };
 
     agyProc.onExit = () => {
@@ -138,6 +167,41 @@ export class AgyAcpAgent {
       .filter(Boolean)
       .join("\n");
 
+    session.cancelRequested = false;
+    const { retries, firstDelayMs } = signInRetryPolicy();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const stopReasonStr = await this.runTurn(session, params.sessionId, rawText);
+        return {
+          stopReason: (stopReasonStr as StopReason) || "end_turn",
+        };
+      } catch (err) {
+        const retryable = err instanceof AgyRunError && err.kind === "sign-in" && err.beforeOutput;
+        if (retryable && attempt < retries && !session.cancelRequested) {
+          const delayMs = firstDelayMs * 2 ** attempt;
+          this.logger?.error(
+            `[AgyAcpAgent] agy could not sign in (${err.message}); retry ${attempt + 1} of ${retries} on a fresh agy in ${delayMs} ms`
+          );
+          session.process.endProcess("its sign-in did not finish");
+          await sleep(delayMs);
+          if (!session.cancelRequested) {
+            continue;
+          }
+        }
+        if (session.cancelRequested) {
+          return { stopReason: "cancelled" };
+        }
+        // A plain Error would reach the client as "Internal error"; this keeps agy's reason, so buzz-acp can retry the
+        // turn with backoff and, when its retries are spent, tell the thread why.
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger?.error(`[AgyAcpAgent] Turn failed: ${message}`);
+        throw new RequestError(AGY_FAILED_TURN_CODE, `agy: ${message}`);
+      }
+    }
+  }
+
+  /** One run of a prompt on the session's agy; the system prompt goes first whenever that agy is new. */
+  private async runTurn(session: SessionData, sessionId: string, rawText: string): Promise<string> {
     let fullPrompt = rawText;
     if (session.isFirstPrompt && session.systemPrompt) {
       fullPrompt = `[SYSTEM INSTRUCTIONS]\n${session.systemPrompt}\n[END SYSTEM INSTRUCTIONS]\n\n${rawText}`;
@@ -146,7 +210,8 @@ export class AgyAcpAgent {
 
     this.logger?.log(`[AgyAcpAgent] Sending prompt to agy (length: ${fullPrompt.length})`);
 
-    const stopReasonStr = await session.process.sendPrompt(fullPrompt, {
+    const params = { sessionId };
+    return session.process.sendPrompt(fullPrompt, {
       onTextDelta: async (text: string): Promise<void> => {
         await this.client.notify(methods.client.session.update, {
           sessionId: params.sessionId,
@@ -185,16 +250,13 @@ export class AgyAcpAgent {
         } as unknown as Parameters<AgentContext["notify"]>[1]);
       },
     });
-
-    return {
-      stopReason: (stopReasonStr as StopReason) || "end_turn",
-    };
   }
 
   public cancel(params: { sessionId: string }): void {
     this.logger?.log(`[AgyAcpAgent] Cancel called for session ${params.sessionId}`);
     const session = this.sessions.get(params.sessionId);
     if (session) {
+      session.cancelRequested = true;
       session.process.cancel();
     }
   }
