@@ -69,6 +69,8 @@ It bridges headless orchestrators (relays, bots, multi-agent frameworks) with `a
 - 🧠 **Context & Prompt Injection**: Automatically mounts custom system prompt files (e.g. `system-prompt.md`) and preserves workspace directories (`cwd`).
 - 📊 **Token Usage Metrics**: Tracks prompt, completion, and total tokens across conversational turns.
 - 🛡 **Resilient Process Supervision**: Robust JSON line buffering, error recovery, signal escalation (`SIGTERM` $\rightarrow$ `SIGKILL`), and crash isolation.
+- 🚨 **Failed Runs Fail the Turn**: When `agy` cannot run a turn (an `ERROR` result such as a 401 or 503 from the model API, or an `agy` that exits before answering), the prompt fails with a JSON-RPC error (`-32000`, message `agy: <agy's reason>`) instead of ending as if `agy` had answered, so the ACP client can retry it or tell the user.
+- 🔑 **Sign-in Retry**: `agy` gives its silent sign-in a fixed 10 seconds (no flag or setting changes it). When the stored access token has expired and the token refresh is slower than that, `agy` fails with `authentication failed or timed out` although the login is fine. If that happens before `agy` reported anything for the turn, the adapter runs the same prompt again on a fresh `agy` (twice by default, after 2 s and 4 s), sending the system prompt again.
 - 🌐 **Docker & Multi-Arch Ready**: Built to operate seamlessly across Linux (x86_64 / arm64) and macOS environments.
 
 ---
@@ -154,9 +156,13 @@ npm link
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `AGY_BIN` | Path to the `agy` executable | `agy` (resolved from `$PATH`) |
-| `AGY_SYSTEM_PROMPT_FILE` | Optional path to custom system instructions file | `/home/agent/system-prompt.md` (if exists) |
-| `DEBUG` | Enable verbose diagnostic logging to `stderr` | `0` (or `agy-agent-acp*`) |
+| `BUZZ_ACP_SYSTEM_PROMPT_FILE` | Optional path to a system instructions file, sent before the first prompt of each `agy` process (merged with a system prompt the client passes in `session/new`) | unset |
+| `AGY_AGENT_LOGS` (or `BUZZ_ACP_LOG_DIR`) | Directory for `agy-acp.log`; logs always go to `stderr` as well | unset |
+| `AGY_ACP_SIGNIN_RETRIES` | How many times a turn whose `agy` could not finish its sign-in is run again on a fresh `agy` (0 turns it off; at most 5) | `2` |
+| `AGY_ACP_SIGNIN_RETRY_DELAY_MS` | Wait before the first such retry, doubled for each further one (at most 30000) | `2000` |
+| `AGY_ACP_EXIT_AFTER_TURN` | `1`: end the `agy` process after each turn and start a fresh one for the next prompt (an idle `agy` holds 75-100 MB; useful when the client keeps many sessions open) | unset |
+
+`agy` itself is spawned as `agy` from `$PATH`, with the adapter's environment.
 
 ---
 
