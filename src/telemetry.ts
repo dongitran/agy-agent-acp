@@ -88,6 +88,8 @@ export interface TelemetryService {
   shutdown(): Promise<void>;
 }
 
+export type TelemetryEngine = TelemetryService;
+
 // Throttled error logger for export errors
 let exportErrorCount = 0;
 function logExportError(logger: Logger | undefined, err: unknown): void {

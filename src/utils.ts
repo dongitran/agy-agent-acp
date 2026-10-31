@@ -1,9 +1,22 @@
 import { Readable, Writable } from "node:stream";
 import { WritableStream, ReadableStream } from "node:stream/web";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface Logger {
   log: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
+}
+
+export function getPackageVersion(): string {
+  try {
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(dir, "../package.json"), "utf-8"));
+    return typeof pkg.version === "string" ? pkg.version : "0.1.5";
+  } catch {
+    return "0.1.5";
+  }
 }
 
 export function nodeToWebWritable(nodeStream: Writable): WritableStream<Uint8Array> {
