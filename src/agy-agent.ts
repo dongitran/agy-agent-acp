@@ -18,8 +18,9 @@ import {
 } from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { AgyProcess, AgyRunError } from "./agy-process.js";
-import { Logger, nodeToWebReadable, nodeToWebWritable, sleep } from "./utils.js";
+import { AgyProcess, AgyRunError, ToolCallEvent, ToolResultEvent } from "./agy-process.js";
+import { getPackageVersion, Logger, nodeToWebReadable, nodeToWebWritable, sleep } from "./utils.js";
+import { initTelemetry, TelemetryEngine } from "./telemetry.js";
 
 interface SessionData {
   sessionId: string;
@@ -60,14 +61,29 @@ export class AgyAcpAgent {
   private client: AgentContext;
   private logger?: Logger;
   private sessions = new Map<string, SessionData>();
+  private telemetry?: TelemetryEngine;
+  private telemetryInitPromise?: Promise<TelemetryEngine | undefined>;
 
   constructor(client: AgentContext, logger?: Logger) {
     this.client = client;
     this.logger = logger;
   }
 
+  private async getTelemetry(): Promise<TelemetryEngine | undefined> {
+    if (this.telemetry) {return this.telemetry;}
+    if (!this.telemetryInitPromise) {
+      this.telemetryInitPromise = initTelemetry(this.logger).then((tel) => {
+        this.telemetry = tel ?? undefined;
+        return this.telemetry;
+      });
+    }
+    return this.telemetryInitPromise;
+  }
+
   public async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.logger?.log("[AgyAcpAgent] Initialize called with params:", params);
+    this.telemetry = await this.getTelemetry();
+    const version = getPackageVersion();
     return {
       protocolVersion: 2,
       capabilities: {
@@ -75,7 +91,7 @@ export class AgyAcpAgent {
       },
       info: {
         name: "agy-agent-acp",
-        version: "0.1.4",
+        version,
       },
       // Backward-compatible fields
       agentCapabilities: {
@@ -83,7 +99,7 @@ export class AgyAcpAgent {
       },
       agentInfo: {
         name: "agy-agent-acp",
-        version: "0.1.4",
+        version,
       },
     } as unknown as InitializeResponse;
   }
@@ -210,46 +226,74 @@ export class AgyAcpAgent {
 
     this.logger?.log(`[AgyAcpAgent] Sending prompt to agy (length: ${fullPrompt.length})`);
 
+    const telemetry = await this.getTelemetry();
+    const turnHandle = telemetry?.startTurnSpan(sessionId, fullPrompt, process.env.AGY_MODEL);
+    let assistantResponseText = "";
+
     const params = { sessionId };
-    return session.process.sendPrompt(fullPrompt, {
-      onTextDelta: async (text: string): Promise<void> => {
-        await this.client.notify(methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: {
-              type: "text",
-              text,
+    try {
+      const stopReason = await session.process.sendPrompt(fullPrompt, {
+        onTextDelta: async (text: string): Promise<void> => {
+          assistantResponseText += text;
+          await this.client.notify(methods.client.session.update, {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: {
+                type: "text",
+                text,
+              },
             },
-          },
-        } as unknown as Parameters<AgentContext["notify"]>[1]);
-      },
-      onToolCall: async (toolName: string, toolParams: unknown): Promise<void> => {
-        this.logger?.log(`[AgyAcpAgent] Tool call: ${toolName}`);
-        await this.client.notify(methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: {
-            sessionUpdate: "tool_call",
-            title: toolName,
-            kind: "tool",
-            toolInput: toolParams,
-          },
-        } as unknown as Parameters<AgentContext["notify"]>[1]);
-      },
-      onUsage: async (usage): Promise<void> => {
-        await this.client.notify(methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: {
-            sessionUpdate: "usage_update",
-            usage: {
-              inputTokens: usage.input_tokens ?? 0,
-              outputTokens: usage.output_tokens ?? 0,
-              totalTokens: usage.total_tokens ?? 0,
+          } as unknown as Parameters<AgentContext["notify"]>[1]);
+        },
+        onToolCall: async (first: ToolCallEvent | string, second?: unknown): Promise<void> => {
+          const isObj = typeof first === "object" && first !== null;
+          const toolName = isObj ? (first as ToolCallEvent).toolName : (first as string);
+          const toolParams = isObj ? (first as ToolCallEvent).parameters : (second as Record<string, unknown> | undefined);
+          const stepIndex = isObj ? (first as ToolCallEvent).stepIndex : 0;
+
+          this.logger?.log(`[AgyAcpAgent] Tool call: ${toolName}`);
+          turnHandle?.startToolSpan(stepIndex, toolName, toolParams);
+          await this.client.notify(methods.client.session.update, {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: "tool_call",
+              title: toolName,
+              kind: "tool",
+              toolInput: toolParams,
             },
-          },
-        } as unknown as Parameters<AgentContext["notify"]>[1]);
-      },
-    });
+          } as unknown as Parameters<AgentContext["notify"]>[1]);
+        },
+        onToolResult: async (event: ToolResultEvent): Promise<void> => {
+          this.logger?.log(`[AgyAcpAgent] Tool result: ${event.toolName} (step ${event.stepIndex})`);
+          turnHandle?.endToolSpan(event.stepIndex, event.toolName, event.output, event.error);
+        },
+        onUsage: async (usage): Promise<void> => {
+          turnHandle?.recordUsage(usage);
+          await this.client.notify(methods.client.session.update, {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: "usage_update",
+              usage: {
+                inputTokens: usage.input_tokens ?? 0,
+                outputTokens: usage.output_tokens ?? 0,
+                totalTokens: usage.total_tokens ?? 0,
+              },
+            },
+          } as unknown as Parameters<AgentContext["notify"]>[1]);
+        },
+      });
+
+      turnHandle?.end("OK", assistantResponseText);
+      telemetry?.backgroundFlush(1000);
+      return stopReason;
+    } catch (err: unknown) {
+      const failureKind = err instanceof AgyRunError ? err.kind : "error";
+      const failureMessage = err instanceof Error ? err.message : String(err);
+      turnHandle?.end("ERROR", undefined, failureKind, failureMessage);
+      telemetry?.backgroundFlush(1000);
+      throw err;
+    }
   }
 
   public cancel(params: { sessionId: string }): void {
@@ -281,6 +325,7 @@ export class AgyAcpAgent {
       session.process.dispose();
     }
     this.sessions.clear();
+    await this.telemetry?.shutdown();
   }
 }
 

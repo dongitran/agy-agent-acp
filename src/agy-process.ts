@@ -48,9 +48,32 @@ export interface AgyEvent {
   };
 }
 
+export interface ToolCallEvent {
+  stepIndex: number;
+  toolName: string;
+  parameters?: Record<string, unknown>;
+}
+
+export interface ToolResultEvent {
+  stepIndex: number;
+  toolName: string;
+  durationSeconds?: number;
+  output?: string;
+  error?: {
+    type?: string;
+    message?: string;
+  };
+}
+
+export type ToolCallCallback = {
+  (event: ToolCallEvent): Promise<void> | void;
+  (toolName: string, params?: unknown): Promise<void> | void;
+};
+
 export interface TurnCallbacks {
   onTextDelta?: (text: string) => Promise<void> | void;
-  onToolCall?: (toolName: string, params: unknown) => Promise<void> | void;
+  onToolCall?: ToolCallCallback;
+  onToolResult?: (event: ToolResultEvent) => Promise<void> | void;
   onUsage?: (usage: AgyUsage) => Promise<void> | void;
 }
 
@@ -226,8 +249,35 @@ export class AgyProcess {
           await this.currentTurnCallbacks.onTextDelta(step.text_delta);
         }
       } else if (step.step_type === "tool" && step.tool_name) {
-        if (this.currentTurnCallbacks?.onToolCall) {
-          await this.currentTurnCallbacks.onToolCall(step.tool_name, step.tool_info?.parameters);
+        const stepIndex = step.step_index ?? 0;
+        const toolName = step.tool_name;
+        const isDone = step.state === "DONE" || step.state === "ERROR";
+        const isActive =
+          step.state === "ACTIVE" ||
+          (!step.state && step.tool_info?.output === undefined && step.tool_info?.error === undefined);
+
+        if (isActive && this.currentTurnCallbacks?.onToolCall) {
+          const fn = this.currentTurnCallbacks.onToolCall;
+          if (fn.length === 2) {
+            await (fn as (name: string, params?: unknown) => Promise<void> | void)(
+              toolName,
+              step.tool_info?.parameters
+            );
+          } else {
+            await (fn as (event: ToolCallEvent) => Promise<void> | void)({
+              stepIndex,
+              toolName,
+              parameters: step.tool_info?.parameters,
+            });
+          }
+        } else if (isDone && this.currentTurnCallbacks?.onToolResult) {
+          await this.currentTurnCallbacks.onToolResult({
+            stepIndex,
+            toolName,
+            durationSeconds: step.duration_seconds,
+            output: step.tool_info?.output,
+            error: step.tool_info?.error,
+          });
         }
       }
 
