@@ -207,7 +207,7 @@ describe("AgyAcpAgent Module", () => {
           await callbacks.onTextDelta("Streaming response text");
         }
         if (callbacks.onToolCall) {
-          await callbacks.onToolCall("grep_search", { Query: "foo" });
+          await callbacks.onToolCall({ stepIndex: 1, toolName: "grep_search", parameters: { Query: "foo" } });
         }
         if (callbacks.onUsage) {
           await callbacks.onUsage({ input_tokens: 50, output_tokens: 10, total_tokens: 60 });

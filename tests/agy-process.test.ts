@@ -144,8 +144,8 @@ describe("AgyProcess Module", () => {
     const toolCalls: Array<{ name: string; params: unknown }> = [];
 
     const callbacks: TurnCallbacks = {
-      onToolCall: (toolName, params) => {
-        toolCalls.push({ name: toolName, params });
+      onToolCall: (event) => {
+        toolCalls.push({ name: event.toolName, params: event.parameters });
       },
     };
 

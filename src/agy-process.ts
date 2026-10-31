@@ -65,10 +65,7 @@ export interface ToolResultEvent {
   };
 }
 
-export type ToolCallCallback = {
-  (event: ToolCallEvent): Promise<void> | void;
-  (toolName: string, params?: unknown): Promise<void> | void;
-};
+export type ToolCallCallback = (event: ToolCallEvent) => Promise<void> | void;
 
 export interface TurnCallbacks {
   onTextDelta?: (text: string) => Promise<void> | void;
@@ -120,6 +117,7 @@ export class AgyProcess {
   private hasEmittedTextThisTurn = false;
   /** agy reported a step (text, tool call or other) for the current turn. */
   private hasOutputThisTurn = false;
+  private activeToolSteps = new Set<number>();
   public onExit?: () => void;
 
   constructor(cwd: string, logger?: Logger) {
@@ -165,7 +163,9 @@ export class AgyProcess {
       if (this.child !== child) {
         return;
       }
-      this.handleLine(line);
+      this.handleLine(line).catch((err) => {
+        this.logger?.error("[AgyProcess] Unhandled error in handleLine:", err);
+      });
     });
 
     this.child.on("error", (err: Error) => {
@@ -257,27 +257,32 @@ export class AgyProcess {
           (!step.state && step.tool_info?.output === undefined && step.tool_info?.error === undefined);
 
         if (isActive && this.currentTurnCallbacks?.onToolCall) {
-          const fn = this.currentTurnCallbacks.onToolCall;
-          if (fn.length === 2) {
-            await (fn as (name: string, params?: unknown) => Promise<void> | void)(
-              toolName,
-              step.tool_info?.parameters
-            );
-          } else {
-            await (fn as (event: ToolCallEvent) => Promise<void> | void)({
+          this.activeToolSteps.add(stepIndex);
+          await this.currentTurnCallbacks.onToolCall({
+            stepIndex,
+            toolName,
+            parameters: step.tool_info?.parameters,
+          });
+        } else if (isDone) {
+          // Fast-tool safeguard: if DONE arrives without a preceding ACTIVE, synthesize onToolCall first
+          if (!this.activeToolSteps.has(stepIndex) && this.currentTurnCallbacks?.onToolCall) {
+            await this.currentTurnCallbacks.onToolCall({
               stepIndex,
               toolName,
               parameters: step.tool_info?.parameters,
             });
           }
-        } else if (isDone && this.currentTurnCallbacks?.onToolResult) {
-          await this.currentTurnCallbacks.onToolResult({
-            stepIndex,
-            toolName,
-            durationSeconds: step.duration_seconds,
-            output: step.tool_info?.output,
-            error: step.tool_info?.error,
-          });
+          this.activeToolSteps.delete(stepIndex);
+
+          if (this.currentTurnCallbacks?.onToolResult) {
+            await this.currentTurnCallbacks.onToolResult({
+              stepIndex,
+              toolName,
+              durationSeconds: step.duration_seconds,
+              output: step.tool_info?.output,
+              error: step.tool_info?.error,
+            });
+          }
         }
       }
 
@@ -331,6 +336,7 @@ export class AgyProcess {
   public async sendPrompt(prompt: string, callbacks: TurnCallbacks): Promise<string> {
     this.hasEmittedTextThisTurn = false;
     this.hasOutputThisTurn = false;
+    this.activeToolSteps.clear();
     this.start();
 
     if (!this.child || !this.child.stdin) {

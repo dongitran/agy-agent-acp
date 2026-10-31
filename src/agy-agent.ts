@@ -72,10 +72,16 @@ export class AgyAcpAgent {
   private async getTelemetry(): Promise<TelemetryEngine | undefined> {
     if (this.telemetry) {return this.telemetry;}
     if (!this.telemetryInitPromise) {
-      this.telemetryInitPromise = initTelemetry(this.logger).then((tel) => {
-        this.telemetry = tel ?? undefined;
-        return this.telemetry;
-      });
+      this.telemetryInitPromise = initTelemetry(this.logger)
+        .then((tel) => {
+          this.telemetry = tel ?? undefined;
+          return this.telemetry;
+        })
+        .catch((err) => {
+          this.logger?.error("[AgyAcpAgent] Telemetry init exception caught, running without telemetry:", err);
+          this.telemetry = undefined;
+          return undefined;
+        });
     }
     return this.telemetryInitPromise;
   }
@@ -246,21 +252,16 @@ export class AgyAcpAgent {
             },
           } as unknown as Parameters<AgentContext["notify"]>[1]);
         },
-        onToolCall: async (first: ToolCallEvent | string, second?: unknown): Promise<void> => {
-          const isObj = typeof first === "object" && first !== null;
-          const toolName = isObj ? (first as ToolCallEvent).toolName : (first as string);
-          const toolParams = isObj ? (first as ToolCallEvent).parameters : (second as Record<string, unknown> | undefined);
-          const stepIndex = isObj ? (first as ToolCallEvent).stepIndex : 0;
-
-          this.logger?.log(`[AgyAcpAgent] Tool call: ${toolName}`);
-          turnHandle?.startToolSpan(stepIndex, toolName, toolParams);
+        onToolCall: async (event: ToolCallEvent): Promise<void> => {
+          this.logger?.log(`[AgyAcpAgent] Tool call: ${event.toolName} (step ${event.stepIndex})`);
+          turnHandle?.startToolSpan(event.stepIndex, event.toolName, event.parameters);
           await this.client.notify(methods.client.session.update, {
             sessionId: params.sessionId,
             update: {
               sessionUpdate: "tool_call",
-              title: toolName,
+              title: event.toolName,
               kind: "tool",
-              toolInput: toolParams,
+              toolInput: event.parameters,
             },
           } as unknown as Parameters<AgentContext["notify"]>[1]);
         },
@@ -284,7 +285,11 @@ export class AgyAcpAgent {
         },
       });
 
-      turnHandle?.end("OK", assistantResponseText);
+      if (stopReason === "cancelled") {
+        turnHandle?.end("ERROR", assistantResponseText, "cancelled", "Turn was cancelled");
+      } else {
+        turnHandle?.end("OK", assistantResponseText);
+      }
       telemetry?.backgroundFlush(1000);
       return stopReason;
     } catch (err: unknown) {

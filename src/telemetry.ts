@@ -1,6 +1,6 @@
 import type { AgyUsage } from "./agy-process.js";
 import type { Span } from "@opentelemetry/api";
-import { Logger } from "./utils.js";
+import { Logger, getPackageVersion } from "./utils.js";
 
 // Secret sanitization patterns
 const PREFIXED_PATTERNS = [
@@ -106,66 +106,67 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
     return null;
   }
 
-  const serviceName = process.env.OTEL_SERVICE_NAME || "agy-agent";
-  const projectName = process.env.PHOENIX_PROJECT_NAME || "default";
-  const apiKey = process.env.PHOENIX_API_KEY;
+  try {
+    const serviceName = process.env.OTEL_SERVICE_NAME || "agy-agent";
+    const projectName = process.env.PHOENIX_PROJECT_NAME || "default";
+    const apiKey = process.env.PHOENIX_API_KEY;
 
-  // Dynamic lazy import to ensure 0ms and 0MB overhead when telemetry is disabled
-  const [
-    api,
-    sdkTrace,
-    resources,
-    exporterProto,
-    semconv
-  ] = await Promise.all([
-    import("@opentelemetry/api"),
-    import("@opentelemetry/sdk-trace-node"),
-    import("@opentelemetry/resources"),
-    import("@opentelemetry/exporter-trace-otlp-proto"),
-    import("@opentelemetry/semantic-conventions")
-  ]);
+    // Dynamic lazy import to ensure 0ms and 0MB overhead when telemetry is disabled
+    const [
+      api,
+      sdkTrace,
+      resources,
+      exporterProto,
+      semconv
+    ] = await Promise.all([
+      import("@opentelemetry/api"),
+      import("@opentelemetry/sdk-trace-node"),
+      import("@opentelemetry/resources"),
+      import("@opentelemetry/exporter-trace-otlp-proto"),
+      import("@opentelemetry/semantic-conventions")
+    ]);
 
-  const { trace, context, SpanStatusCode } = api;
-  const { NodeTracerProvider, BatchSpanProcessor } = sdkTrace;
-  const { resourceFromAttributes } = resources;
-  const { OTLPTraceExporter } = exporterProto;
-  const { ATTR_SERVICE_NAME } = semconv;
+    const { trace, context, SpanStatusCode } = api;
+    const { NodeTracerProvider, BatchSpanProcessor } = sdkTrace;
+    const { resourceFromAttributes } = resources;
+    const { OTLPTraceExporter } = exporterProto;
+    const { ATTR_SERVICE_NAME } = semconv;
 
-  const headers: Record<string, string> = {
-    "x-project-name": projectName
-  };
-  if (apiKey) {
-    headers["Authorization"] = `Bearer ${apiKey}`;
-  }
-
-  const exporter = new OTLPTraceExporter({
-    url: tracesEndpoint,
-    headers,
-    timeoutMillis: 1000
-  });
-
-  const batchProcessor = new BatchSpanProcessor(exporter, {
-    maxQueueSize: 512,
-    maxExportBatchSize: 64,
-    scheduledDelayMillis: 30000,
-    exportTimeoutMillis: 1000
-  });
-
-  const resource = resourceFromAttributes({
-    [ATTR_SERVICE_NAME]: serviceName,
-    "openinference.project.name": projectName
-  });
-
-  const provider = new NodeTracerProvider({
-    resource,
-    spanProcessors: [batchProcessor],
-    spanLimits: {
-      attributeValueLengthLimit: 8192
+    const headers: Record<string, string> = {
+      "x-project-name": projectName
+    };
+    if (apiKey) {
+      headers["Authorization"] = `Bearer ${apiKey}`;
     }
-  });
 
-  provider.register();
-  const tracer = trace.getTracer("agy-agent-acp", "0.1.5");
+    const exporter = new OTLPTraceExporter({
+      url: tracesEndpoint,
+      headers,
+      timeoutMillis: 1000
+    });
+
+    const batchProcessor = new BatchSpanProcessor(exporter, {
+      maxQueueSize: 512,
+      maxExportBatchSize: 64,
+      scheduledDelayMillis: 30000,
+      exportTimeoutMillis: 1000
+    });
+
+    const resource = resourceFromAttributes({
+      [ATTR_SERVICE_NAME]: serviceName,
+      "openinference.project.name": projectName
+    });
+
+    const provider = new NodeTracerProvider({
+      resource,
+      spanProcessors: [batchProcessor],
+      spanLimits: {
+        attributeValueLengthLimit: 8192
+      }
+    });
+
+    provider.register();
+    const tracer = trace.getTracer("agy-agent-acp", getPackageVersion());
 
   return {
     startTurnSpan(sessionId: string, promptText: string, modelName?: string): TurnSpanHandle {
@@ -216,7 +217,13 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
 
         endToolSpan(stepIndex: number, _toolName: string, output?: string, error?: { type?: string; message?: string }): void {
           const toolSpan = activeToolSpans.get(stepIndex);
-          if (!toolSpan) {return;}
+          if (!toolSpan) {
+            rootSpan.addEvent("unmapped_tool_result", {
+              "step.index": stepIndex,
+              "tool.name": _toolName,
+            });
+            return;
+          }
 
           if (error) {
             toolSpan.setStatus({
@@ -231,8 +238,11 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
           }
 
           if (output !== undefined) {
-            toolSpan.setAttribute("output.value", truncatePayload(redactSecrets(output)));
-            toolSpan.setAttribute("output.mime_type", "text/plain");
+            toolSpan.setAttribute("tool.output_bytes", Buffer.byteLength(output, "utf8"));
+            if (process.env.OTEL_CAPTURE_TOOL_OUTPUT === "true") {
+              toolSpan.setAttribute("output.value", truncatePayload(redactSecrets(output)));
+              toolSpan.setAttribute("output.mime_type", "text/plain");
+            }
           }
 
           toolSpan.end();
@@ -242,11 +252,14 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
         recordUsage(usage: AgyUsage): void {
           const promptTokens = (usage.input_tokens || 0) + (usage.cache_read_tokens || 0);
           const completionTokens = (usage.output_tokens || 0) + (usage.thinking_tokens || 0);
+          const totalTokens = promptTokens + completionTokens;
 
           llmSpan.setAttribute("llm.token_count.prompt", promptTokens);
           llmSpan.setAttribute("llm.token_count.completion", completionTokens);
+          llmSpan.setAttribute("llm.token_count.total", totalTokens);
+
           if (usage.total_tokens !== undefined) {
-            llmSpan.setAttribute("llm.token_count.total", usage.total_tokens);
+            llmSpan.setAttribute("agy.usage.raw_total_tokens", usage.total_tokens);
           }
           if (usage.cache_read_tokens) {
             llmSpan.setAttribute("llm.token_count.prompt_details.cache_read", usage.cache_read_tokens);
@@ -315,4 +328,8 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
       }
     }
   };
+  } catch (err) {
+    logger?.error(`[Telemetry] Failed to initialize OpenTelemetry SDK, running in fail-open mode: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
 }
