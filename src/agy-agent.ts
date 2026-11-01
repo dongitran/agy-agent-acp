@@ -285,8 +285,10 @@ export class AgyAcpAgent {
         },
       });
 
+      await session.process.drainQueue();
+
       if (stopReason === "cancelled") {
-        turnHandle?.end("ERROR", assistantResponseText, "cancelled", "Turn was cancelled");
+        turnHandle?.end("CANCELLED", assistantResponseText);
       } else {
         turnHandle?.end("OK", assistantResponseText);
       }

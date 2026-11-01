@@ -104,6 +104,18 @@ export function isSignInError(message: string | undefined): boolean {
   return typeof message === "string" && SIGN_IN_ERROR.test(message);
 }
 
+const withTimeout = <T>(promise: Promise<T> | void, ms = 3000): Promise<T | void> => {
+  if (!promise || typeof (promise as Promise<T>).then !== "function") {
+    return Promise.resolve(promise);
+  }
+  return Promise.race([
+    promise as Promise<T>,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Callback execution timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+};
+
 export class AgyProcess {
   private child: ChildProcess | null = null;
   private rl: readline.Interface | null = null;
@@ -118,7 +130,19 @@ export class AgyProcess {
   /** agy reported a step (text, tool call or other) for the current turn. */
   private hasOutputThisTurn = false;
   private activeToolSteps = new Set<number>();
+  /** Tool steps whose DONE or ERROR this turn already handled: agy may repeat it. */
+  private completedToolSteps = new Set<number>();
+  /** Sequential queue for lifecycle-altering lines (tool, result, init) to prevent microtask races. */
+  private lineQueue: Promise<void> = Promise.resolve();
+  private pendingLines = 0;
   public onExit?: () => void;
+
+  /**
+   * Waits for all queued stdout lines to be fully processed by callbacks.
+   */
+  public async drainQueue(): Promise<void> {
+    await this.lineQueue;
+  }
 
   constructor(cwd: string, logger?: Logger) {
     this.cwd = cwd;
@@ -158,14 +182,40 @@ export class AgyProcess {
     // An agy's listeners act only while it is this session's agy: once endProcess() has let it go (a restart, or the
     // end of a turn), its late output or exit must not touch the next agy's turn.
     const child = this.child;
+    this.lineQueue = Promise.resolve();
+    this.pendingLines = 0;
 
     this.rl.on("line", (line: string) => {
       if (this.child !== child) {
         return;
       }
-      this.handleLine(line).catch((err) => {
-        this.logger?.error("[AgyProcess] Unhandled error in handleLine:", err);
-      });
+
+      // Fast-path: agent_response text_delta does not alter lifecycle state, so dispatch directly
+      // to eliminate streaming latency penalties without blocking on sequential queue.
+      if (line.includes('"agent_response"') && line.includes('"text_delta"')) {
+        this.handleLine(line).catch((err) => {
+          this.logger?.error("[AgyProcess] Unhandled error in fast-path handleLine:", err);
+        });
+        return;
+      }
+
+      // Lifecycle events (tool, result, init, etc.) are strictly sequenced.
+      this.pendingLines++;
+      if (this.pendingLines > 50 && this.child?.stdout && !this.child.stdout.isPaused()) {
+        this.child.stdout.pause();
+      }
+
+      this.lineQueue = this.lineQueue
+        .then(() => (this.child === child ? this.handleLine(line) : undefined))
+        .catch((err) => {
+          this.logger?.error("[AgyProcess] Unhandled error in queued handleLine:", err);
+        })
+        .finally(() => {
+          this.pendingLines--;
+          if (this.pendingLines < 10 && this.child?.stdout && this.child.stdout.isPaused()) {
+            this.child.stdout.resume();
+          }
+        });
     });
 
     this.child.on("error", (err: Error) => {
@@ -258,30 +308,39 @@ export class AgyProcess {
 
         if (isActive && this.currentTurnCallbacks?.onToolCall) {
           this.activeToolSteps.add(stepIndex);
-          await this.currentTurnCallbacks.onToolCall({
-            stepIndex,
-            toolName,
-            parameters: step.tool_info?.parameters,
-          });
-        } else if (isDone) {
-          // Fast-tool safeguard: if DONE arrives without a preceding ACTIVE, synthesize onToolCall first
-          if (!this.activeToolSteps.has(stepIndex) && this.currentTurnCallbacks?.onToolCall) {
-            await this.currentTurnCallbacks.onToolCall({
+          await withTimeout(
+            this.currentTurnCallbacks.onToolCall({
               stepIndex,
               toolName,
               parameters: step.tool_info?.parameters,
-            });
+            })
+          ).catch((err) => this.logger?.error(`[AgyProcess] Error in onToolCall for step ${stepIndex}:`, err));
+        } else if (isDone && this.completedToolSteps.has(stepIndex)) {
+          this.logger?.log(`[AgyProcess] Ignoring repeated ${step.state} for tool step ${stepIndex}`);
+        } else if (isDone) {
+          this.completedToolSteps.add(stepIndex);
+          // Fast-tool safeguard: if DONE arrives without a preceding ACTIVE, synthesize onToolCall first
+          if (!this.activeToolSteps.has(stepIndex) && this.currentTurnCallbacks?.onToolCall) {
+            await withTimeout(
+              this.currentTurnCallbacks.onToolCall({
+                stepIndex,
+                toolName,
+                parameters: step.tool_info?.parameters,
+              })
+            ).catch((err) => this.logger?.error(`[AgyProcess] Error in fast-tool onToolCall for step ${stepIndex}:`, err));
           }
           this.activeToolSteps.delete(stepIndex);
 
           if (this.currentTurnCallbacks?.onToolResult) {
-            await this.currentTurnCallbacks.onToolResult({
-              stepIndex,
-              toolName,
-              durationSeconds: step.duration_seconds,
-              output: step.tool_info?.output,
-              error: step.tool_info?.error,
-            });
+            await withTimeout(
+              this.currentTurnCallbacks.onToolResult({
+                stepIndex,
+                toolName,
+                durationSeconds: step.duration_seconds,
+                output: step.tool_info?.output,
+                error: step.tool_info?.error,
+              })
+            ).catch((err) => this.logger?.error(`[AgyProcess] Error in onToolResult for step ${stepIndex}:`, err));
           }
         }
       }
@@ -337,6 +396,7 @@ export class AgyProcess {
     this.hasEmittedTextThisTurn = false;
     this.hasOutputThisTurn = false;
     this.activeToolSteps.clear();
+    this.completedToolSteps.clear();
     this.start();
 
     if (!this.child || !this.child.stdin) {
