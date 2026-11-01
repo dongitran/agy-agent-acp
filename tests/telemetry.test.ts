@@ -1,9 +1,57 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { initTelemetry, redactSecrets, truncatePayload } from "../src/telemetry.js";
+import { initTelemetry, parseNostrContext, redactSecrets, truncatePayload, _resetProcessSecretsCache } from "../src/telemetry.js";
 
 describe("TelemetryService", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
+    _resetProcessSecretsCache();
+  });
+
+  it("parses Nostr thread context and metadata from ACP prompt text", () => {
+    const rawPrompt = `
+[Context]
+Scope: thread
+Channel: twin (#01fd5ea1-0089-471b-9aac-96e54993a4ab)
+Thread root: 4e1899a0855358de0675f06861a6cd5a4b9398228c05e9172cce1c18769487c0
+Use buzz messages thread --channel <UUID> --event <ID> to fetch thread context.
+[Buzz event: @mention]
+Event ID: a297490c80797211812b54d43bee951986e69a698a42bb86b29e3198adf2d60c
+Channel: twin (#01fd5ea1-0089-471b-9aac-96e54993a4ab)
+Kind: 9
+From: Elio Tran (npub: npub1lt6z6e95lgsr8dfc27hjemj2z4hrh22d96j0lvu7hj2j2pdexlksyt0uu7, hex: faf42d64b4fa2033b53857af2cee4a156e3ba94d2ea4ffb39ebc952505b937ed)
+Time: 2026-11-01T07:58:47+00:00
+Content: @Phoenix Twin Hello
+Parsed: parent=4e1899a0855358de0675f06861a6cd5a4b9398228c05e9172cce1c18769487c0, root=4e1899a0855358de0675f06861a6cd5a4b9398228c05e9172cce1c18769487c0
+    `;
+
+    const meta = parseNostrContext(rawPrompt);
+    expect(meta.threadRootId).toBe("4e1899a0855358de0675f06861a6cd5a4b9398228c05e9172cce1c18769487c0");
+    expect(meta.eventId).toBe("a297490c80797211812b54d43bee951986e69a698a42bb86b29e3198adf2d60c");
+    expect(meta.channelId).toBe("01fd5ea1-0089-471b-9aac-96e54993a4ab");
+    expect(meta.channelName).toBe("twin");
+    expect(meta.replyToId).toBe("4e1899a0855358de0675f06861a6cd5a4b9398228c05e9172cce1c18769487c0");
+    expect(meta.senderName).toBe("Elio Tran");
+    expect(meta.senderPubkey).toBe("faf42d64b4fa2033b53857af2cee4a156e3ba94d2ea4ffb39ebc952505b937ed");
+  });
+
+  it("correlates session.id to Nostr Thread Root ID when metadata is provided", async () => {
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.4.1:6006/v1/traces");
+    vi.stubEnv("AGENT_ID", "phoenix-twin");
+    vi.stubEnv("AGENT_COMMUNITY", "mobile");
+
+    const service = await initTelemetry();
+    expect(service).not.toBeNull();
+
+    const nostrMeta = {
+      threadRootId: "4e1899a0855358de0675f06861a6cd5a4b9398228c05e9172cce1c18769487c0",
+      eventId: "a297490c80797211812b54d43bee951986e69a698a42bb86b29e3198adf2d60c",
+      channelId: "01fd5ea1-0089-471b-9aac-96e54993a4ab",
+      replyToId: "4e1899a0855358de0675f06861a6cd5a4b9398228c05e9172cce1c18769487c0"
+    };
+
+    const turn = service!.startTurnSpan("random-uuid-session", "Prompt text", "gemini-3.8-flash-high", nostrMeta);
+    expect(turn).toBeDefined();
+    turn.end("OK", "Response");
   });
 
   it("returns null when OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is unset", async () => {

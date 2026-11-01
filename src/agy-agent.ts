@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { AgyProcess, AgyRunError, ToolCallEvent, ToolResultEvent } from "./agy-process.js";
 import { getPackageVersion, Logger, nodeToWebReadable, nodeToWebWritable, sleep } from "./utils.js";
-import { initTelemetry, TelemetryEngine } from "./telemetry.js";
+import { initTelemetry, parseNostrContext, TelemetryEngine } from "./telemetry.js";
 
 interface SessionData {
   sessionId: string;
@@ -232,8 +232,9 @@ export class AgyAcpAgent {
 
     this.logger?.log(`[AgyAcpAgent] Sending prompt to agy (length: ${fullPrompt.length})`);
 
+    const nostrMeta = parseNostrContext(rawText);
     const telemetry = await this.getTelemetry();
-    const turnHandle = telemetry?.startTurnSpan(sessionId, fullPrompt, process.env.AGY_MODEL);
+    const turnHandle = telemetry?.startTurnSpan(sessionId, fullPrompt, process.env.AGY_MODEL, nostrMeta);
     let assistantResponseText = "";
 
     const params = { sessionId };
