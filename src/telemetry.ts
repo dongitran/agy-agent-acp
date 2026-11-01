@@ -79,7 +79,8 @@ export interface TurnSpanHandle {
   startToolSpan(stepIndex: number, toolName: string, toolParams: unknown): void;
   endToolSpan(stepIndex: number, toolName: string, output?: string, error?: { type?: string; message?: string }): void;
   recordUsage(usage: AgyUsage): void;
-  end(status: "OK" | "ERROR", outputValue?: string, failureKind?: string, errorMessage?: string): void;
+  /** CANCELLED leaves the spans' status unset (a cancel is not an error) and sets agy.stop_reason. */
+  end(status: "OK" | "ERROR" | "CANCELLED", outputValue?: string, failureKind?: string, errorMessage?: string): void;
 }
 
 export interface TelemetryService {
@@ -269,10 +270,15 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
           }
         },
 
-        end(status: "OK" | "ERROR", outputValue?: string, failureKind?: string, errorMessage?: string): void {
+        end(status: "OK" | "ERROR" | "CANCELLED", outputValue?: string, failureKind?: string, errorMessage?: string): void {
+          const cancelled = status === "CANCELLED";
           // Close any lingering tool spans
           for (const [idx, toolSpan] of activeToolSpans.entries()) {
-            toolSpan.setStatus({ code: SpanStatusCode.ERROR, message: "Turn ended before tool completed" });
+            if (cancelled) {
+              toolSpan.setAttribute("agy.stop_reason", "cancelled");
+            } else {
+              toolSpan.setStatus({ code: SpanStatusCode.ERROR, message: "Turn ended before tool completed" });
+            }
             toolSpan.end();
             activeToolSpans.delete(idx);
           }
@@ -286,6 +292,8 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
           }
           if (status === "ERROR") {
             llmSpan.setStatus({ code: SpanStatusCode.ERROR, message: errorMessage || "LLM turn error" });
+          } else if (cancelled) {
+            llmSpan.setAttribute("agy.stop_reason", "cancelled");
           } else {
             llmSpan.setStatus({ code: SpanStatusCode.OK });
           }
@@ -302,6 +310,8 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
             if (failureKind) {
               rootSpan.setAttribute("agy.failure_kind", failureKind);
             }
+          } else if (cancelled) {
+            rootSpan.setAttribute("agy.stop_reason", "cancelled");
           } else {
             rootSpan.setStatus({ code: SpanStatusCode.OK });
           }

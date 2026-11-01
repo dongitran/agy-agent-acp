@@ -81,7 +81,7 @@ describe("tool span wiring between AgyProcess and AgyAcpAgent", () => {
     expect(turnHandle.endToolSpan).toHaveBeenCalledWith(2, "run_command", undefined, { message: "Command timed out" });
   });
 
-  it("records ERROR on turn span when turn is cancelled", async () => {
+  it("records CANCELLED on turn span when turn is cancelled", async () => {
     const agent = new AgyAcpAgent({ notify: vi.fn() } as unknown as AgentContext);
     const turnHandle = { startToolSpan: vi.fn(), endToolSpan: vi.fn(), recordUsage: vi.fn(), end: vi.fn() };
     (agent as any).telemetry = { startTurnSpan: () => turnHandle, backgroundFlush: vi.fn(), shutdown: vi.fn() };
@@ -94,7 +94,7 @@ describe("tool span wiring between AgyProcess and AgyAcpAgent", () => {
     const stopReason = await agent.prompt({ sessionId, prompt: [{ type: "text", text: "cancel test" }] });
 
     expect(stopReason.stopReason).toBe("cancelled");
-    expect(turnHandle.end).toHaveBeenCalledWith("ERROR", "", "cancelled", "Turn was cancelled");
+    expect(turnHandle.end).toHaveBeenCalledWith("CANCELLED", "");
   });
 
   it("guarantees fail-open behavior in initTelemetry when endpoint is missing", async () => {
