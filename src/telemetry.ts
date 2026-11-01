@@ -26,12 +26,27 @@ function getProcessSecrets(): string[] {
   const secrets: string[] = [];
   const sensitiveKeys = [
     "BUZZ_PRIVATE_KEY",
+    "BUZZ_AUTH_TAG",
     "GITLAB_TOKEN",
     "AGY_OAUTH_TOKEN_B64",
     "PHOENIX_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "MEETING_GATE_TOKEN",
   ];
+
+  // Dynamic secret scanning: harvest any environment variable containing secret keywords
+  for (const [key, val] of Object.entries(process.env)) {
+    if (!val || typeof val !== "string" || val.length < 8) {continue;}
+    if (/(KEY|TOKEN|SECRET|AUTH|PASSWORD|PRIVATE|NSEC)/i.test(key)) {
+      secrets.push(val);
+      try {
+        const b64 = Buffer.from(val).toString("base64");
+        if (b64.length >= 8) {secrets.push(b64);}
+      } catch {
+        // ignore
+      }
+    }
+  }
 
   for (const key of sensitiveKeys) {
     const val = process.env[key];
@@ -212,7 +227,7 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
     const batchProcessor = new BatchSpanProcessor(exporter, {
       maxQueueSize: 512,
       maxExportBatchSize: 64,
-      scheduledDelayMillis: 30000,
+      scheduledDelayMillis: 2000,
       exportTimeoutMillis: 1000
     });
 
@@ -280,9 +295,11 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
           const toolSpan = tracer.startSpan(`tool:${toolName}`, {
             attributes: {
               "openinference.span.kind": "TOOL",
+              "session.id": resolvedSessionId,
               "tool.name": toolName,
               "input.value": sanitizedParams,
-              "input.mime_type": "application/json"
+              "input.mime_type": "application/json",
+              ...(process.env.AGENT_ID ? { "agent.id": process.env.AGENT_ID } : {}),
             }
           }, rootContext);
 
