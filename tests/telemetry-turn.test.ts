@@ -139,7 +139,7 @@ describe("AgyAcpAgent Telemetry Lifecycle", () => {
     });
 
     expect(res.stopReason).toBe("end_turn");
-    expect(mockTelemetry.startTurnSpan).toHaveBeenCalledWith(sessionId, "List files", undefined);
+    expect(mockTelemetry.startTurnSpan).toHaveBeenCalledWith(sessionId, "List files", undefined, expect.any(Object));
     expect(mockTurnHandle.startToolSpan).toHaveBeenCalledWith(1, "run_command", { CommandLine: "ls" });
     expect(mockTurnHandle.endToolSpan).toHaveBeenCalledWith(1, "run_command", "file.txt\n", undefined);
     expect(mockTurnHandle.recordUsage).toHaveBeenCalledWith({ input_tokens: 10, output_tokens: 5 });

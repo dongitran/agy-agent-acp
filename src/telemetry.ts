@@ -15,6 +15,10 @@ const PREFIXED_PATTERNS = [
 
 let cachedProcessSecrets: string[] | null = null;
 
+export function _resetProcessSecretsCache(): void {
+  cachedProcessSecrets = null;
+}
+
 function getProcessSecrets(): string[] {
   if (cachedProcessSecrets !== null) {
     return cachedProcessSecrets;
@@ -83,8 +87,67 @@ export interface TurnSpanHandle {
   end(status: "OK" | "ERROR" | "CANCELLED", outputValue?: string, failureKind?: string, errorMessage?: string): void;
 }
 
+export interface NostrMetadata {
+  threadRootId?: string;
+  eventId?: string;
+  channelId?: string;
+  channelName?: string;
+  replyToId?: string;
+  senderName?: string;
+  senderPubkey?: string;
+}
+
+export function parseNostrContext(text: string): NostrMetadata {
+  const result: NostrMetadata = {};
+  if (!text) {
+    return result;
+  }
+
+  // 1. Thread Root ID: "Thread root: <64-hex>" or "root=<64-hex>"
+  const rootMatch = text.match(/Thread root:\s*([a-f0-9]{64})/i) || text.match(/\broot=([a-f0-9]{64})\b/i);
+  if (rootMatch) {
+    result.threadRootId = rootMatch[1].toLowerCase();
+  }
+
+  // 2. Event ID: "Event ID: <64-hex>"
+  const eventMatch = text.match(/Event ID:\s*([a-f0-9]{64})/i);
+  if (eventMatch) {
+    result.eventId = eventMatch[1].toLowerCase();
+    if (!result.threadRootId) {
+      result.threadRootId = result.eventId;
+    }
+  }
+
+  // 3. Channel ID: "(#<UUID>)"
+  const channelMatch = text.match(/#([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+  if (channelMatch) {
+    result.channelId = channelMatch[1].toLowerCase();
+  }
+
+  // 4. Channel Name: "Channel: <name> (#...)"
+  const channelNameMatch = text.match(/Channel:\s*([a-zA-Z0-9_\-]+)\s*\(/i);
+  if (channelNameMatch) {
+    result.channelName = channelNameMatch[1];
+  }
+
+  // 5. Parent / Reply-To ID: "parent=<64-hex>"
+  const parentMatch = text.match(/\bparent=([a-f0-9]{64})\b/i);
+  if (parentMatch) {
+    result.replyToId = parentMatch[1].toLowerCase();
+  }
+
+  // 6. Sender info: "From: Name (npub: ..., hex: <64-hex>)"
+  const fromMatch = text.match(/From:\s*([^(]+?)\s*\(.*?hex:\s*([a-f0-9]{64})\)/i);
+  if (fromMatch) {
+    result.senderName = fromMatch[1].trim();
+    result.senderPubkey = fromMatch[2].toLowerCase();
+  }
+
+  return result;
+}
+
 export interface TelemetryService {
-  startTurnSpan(sessionId: string, promptText: string, modelName?: string): TurnSpanHandle;
+  startTurnSpan(sessionId: string, promptText: string, modelName?: string, nostrMeta?: NostrMetadata): TurnSpanHandle;
   backgroundFlush(timeoutMs?: number): void;
   shutdown(): Promise<void>;
 }
@@ -170,14 +233,23 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
     const tracer = trace.getTracer("agy-agent-acp", getPackageVersion());
 
   return {
-    startTurnSpan(sessionId: string, promptText: string, modelName?: string): TurnSpanHandle {
+    startTurnSpan(sessionId: string, promptText: string, modelName?: string, nostrMeta?: NostrMetadata): TurnSpanHandle {
       const sanitizedPrompt = truncatePayload(redactSecrets(promptText));
+      const resolvedSessionId = nostrMeta?.threadRootId || sessionId;
       const rootSpan = tracer.startSpan("agent_turn", {
         attributes: {
           "openinference.span.kind": "AGENT",
-          "session.id": sessionId,
+          "session.id": resolvedSessionId,
           "input.value": sanitizedPrompt,
-          "input.mime_type": "text/plain"
+          "input.mime_type": "text/plain",
+          ...(nostrMeta?.threadRootId ? { "nostr.thread_id": nostrMeta.threadRootId } : {}),
+          ...(nostrMeta?.eventId ? { "nostr.event_id": nostrMeta.eventId } : {}),
+          ...(nostrMeta?.channelId ? { "nostr.channel_id": nostrMeta.channelId } : {}),
+          ...(nostrMeta?.channelName ? { "nostr.channel_name": nostrMeta.channelName } : {}),
+          ...(nostrMeta?.replyToId ? { "nostr.reply_to": nostrMeta.replyToId } : {}),
+          ...(nostrMeta?.senderPubkey ? { "nostr.sender_pubkey": nostrMeta.senderPubkey } : {}),
+          ...(process.env.AGENT_ID ? { "agent.id": process.env.AGENT_ID } : {}),
+          ...(process.env.AGENT_COMMUNITY ? { "agent.community": process.env.AGENT_COMMUNITY } : {}),
         }
       });
 
@@ -189,6 +261,7 @@ export async function initTelemetry(logger?: Logger): Promise<TelemetryService |
       const llmSpan = tracer.startSpan(`llm:${resolvedModel}`, {
         attributes: {
           "openinference.span.kind": "LLM",
+          "session.id": resolvedSessionId,
           "llm.model_name": resolvedModel,
           "llm.provider": "google",
           "input.value": sanitizedPrompt,
