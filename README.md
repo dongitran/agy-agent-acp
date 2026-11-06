@@ -71,6 +71,7 @@ It bridges headless orchestrators (relays, bots, multi-agent frameworks) with `a
 - 🛡 **Resilient Process Supervision**: Robust JSON line buffering, error recovery, signal escalation (`SIGTERM` $\rightarrow$ `SIGKILL`), and crash isolation.
 - 🚨 **Failed Runs Fail the Turn**: When `agy` cannot run a turn (an `ERROR` result such as a 401 or 503 from the model API, or an `agy` that exits before answering), the prompt fails with a JSON-RPC error (`-32000`, message `agy: <agy's reason>`) instead of ending as if `agy` had answered, so the ACP client can retry it or tell the user.
 - 🔑 **Sign-in Retry**: `agy` gives its silent sign-in a fixed 10 seconds (no flag or setting changes it). When the stored access token has expired and the token refresh is slower than that, `agy` fails with `authentication failed or timed out` although the login is fine. If that happens before `agy` reported anything for the turn, the adapter runs the same prompt again on a fresh `agy` (twice by default, after 2 s and 4 s), sending the system prompt again.
+- 📈 **Run Metrics (OTLP)**: With `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` set, every `agy` run is counted by how it ended — `ok`, `cancelled`, or `error` with a fixed class (`capacity`, `quota`, `unavailable`, `auth`, `timeout`, `network`, …) and its HTTP status — with its duration and tokens, pushed as OpenTelemetry metrics. See [Run metrics](#-run-metrics).
 - 🌐 **Docker & Multi-Arch Ready**: Built to operate seamlessly across Linux (x86_64 / arm64) and macOS environments.
 
 ---
@@ -163,6 +164,51 @@ npm link
 | `AGY_ACP_EXIT_AFTER_TURN` | `1`: end the `agy` process after each turn and start a fresh one for the next prompt (an idle `agy` holds 75-100 MB; useful when the client keeps many sessions open) | unset |
 
 `agy` itself is spawned as `agy` from `$PATH`, with the adapter's environment.
+
+---
+
+## 📈 Run metrics
+
+Off unless `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set; the OpenTelemetry metrics SDK is not even loaded then. When on,
+the adapter pushes OTLP/HTTP (protobuf, cumulative temporality) every `OTEL_METRIC_EXPORT_INTERVAL` ms and right after
+each run, and never lets an export fail, delay or change a turn. The resource is empty, so a receiver such as
+VictoriaMetrics (`/opentelemetry/v1/metrics`) stores only the labels below.
+
+| Series | Labels | What it counts |
+| :--- | :--- | :--- |
+| `agy_runs_total` | `outcome`, `error_class`, `http_code` + common | One per `agy` run (a sign-in retry is a run of its own) |
+| `agy_run_duration_seconds` (histogram) | `outcome` + common | Wall-clock time of a run; buckets 1 s … 2 h |
+| `agy_tokens_total` | `type` (`input`, `output`, `cache_read`, `thinking`) + common | The run's last usage report |
+
+Common labels: `agent` (`AGENT_ID`), `community` (`AGENT_COMMUNITY`), `model` (`AGY_MODEL`), `account` (`AGY_ACCOUNT`, a
+number naming the `agy` login — never the token or its e-mail). An empty label is left out.
+
+`error_class` reduces `agy`'s message to a fixed set (the message itself is never exported):
+
+| `error_class` | `agy` said, for example |
+| :--- | :--- |
+| `capacity` | `UNAVAILABLE (code 503): No capacity available for model … on the server` |
+| `quota` | `Individual quota reached … Resets in 5h44m` (`http_code` 429), `RESOURCE_EXHAUSTED` |
+| `unavailable` | any other 503 |
+| `auth` | `authentication failed or timed out`, 401, 403 |
+| `invalid_request` | `INVALID_ARGUMENT (code 400)` |
+| `server_error` | another 5xx |
+| `malformed_output` | `improperly formatted function call` |
+| `timeout` | `stream idle timeout`, `deadline exceeded` |
+| `network` | `dial tcp …`, `There was a network issue`, `The stream was interrupted` |
+| `exited` | `agy` exited before it answered |
+| `other` | anything else |
+
+A run that `agy` retried internally (`Run: attempt N failed … retrying`) and then finished counts once, by how it ended.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Full OTLP/HTTP metrics URL, e.g. `http://vmagent:8429/opentelemetry/v1/metrics` | unset (off) |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Periodic export interval, ms | `15000` |
+| `OTEL_METRIC_EXPORT_TIMEOUT` / `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` | Export timeout, ms | `5000` |
+| `AGENT_ID`, `AGENT_COMMUNITY`, `AGY_MODEL`, `AGY_ACCOUNT` | The common labels | empty |
+
+> 0.1.x is the maintenance line of 0.1.4: 0.1.6 is 0.1.4 with run metrics only (no Phoenix tracing, which 0.1.5 and 0.2.x carry).
 
 ---
 

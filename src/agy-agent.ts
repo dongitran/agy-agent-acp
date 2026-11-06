@@ -19,6 +19,8 @@ import {
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { AgyProcess, AgyRunError } from "./agy-process.js";
+import type { AgyUsage } from "./agy-process.js";
+import { initMetrics, MetricsService, RunRecord } from "./metrics.js";
 import { Logger, nodeToWebReadable, nodeToWebWritable, sleep } from "./utils.js";
 
 interface SessionData {
@@ -60,14 +62,52 @@ export class AgyAcpAgent {
   private client: AgentContext;
   private logger?: Logger;
   private sessions = new Map<string, SessionData>();
+  private metrics?: MetricsService;
+  private metricsInitPromise?: Promise<MetricsService | undefined>;
 
-  constructor(client: AgentContext, logger?: Logger) {
+  /** `options.metrics` replaces the env-built metrics (tests); null turns them off. */
+  constructor(client: AgentContext, logger?: Logger, options: { metrics?: MetricsService | null } = {}) {
     this.client = client;
     this.logger = logger;
+    if (options.metrics !== undefined) {
+      this.metrics = options.metrics ?? undefined;
+      this.metricsInitPromise = Promise.resolve(this.metrics);
+    }
+  }
+
+  /** Run metrics (src/metrics.ts): built once from the env, undefined when off or when they could not start. */
+  private async getMetrics(): Promise<MetricsService | undefined> {
+    if (!this.metricsInitPromise) {
+      this.metricsInitPromise = initMetrics(this.logger)
+        .then((m) => {
+          this.metrics = m ?? undefined;
+          return this.metrics;
+        })
+        .catch((err) => {
+          this.logger?.error("[AgyAcpAgent] Metrics init exception caught, running without metrics:", err);
+          this.metrics = undefined;
+          return undefined;
+        });
+    }
+    return this.metricsInitPromise;
+  }
+
+  /** Records a run and exports it now, in the background: metrics never fail, delay or change a turn. */
+  private recordRun(metrics: MetricsService | undefined, run: RunRecord): void {
+    if (!metrics) {
+      return;
+    }
+    try {
+      metrics.recordRun(run);
+      void metrics.flush().catch(() => {});
+    } catch (err) {
+      this.logger?.error(`[AgyAcpAgent] Could not record run metrics: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   public async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.logger?.log("[AgyAcpAgent] Initialize called with params:", params);
+    await this.getMetrics();
     return {
       protocolVersion: 2,
       capabilities: {
@@ -75,7 +115,7 @@ export class AgyAcpAgent {
       },
       info: {
         name: "agy-agent-acp",
-        version: "0.1.4",
+        version: "0.1.6",
       },
       // Backward-compatible fields
       agentCapabilities: {
@@ -83,7 +123,7 @@ export class AgyAcpAgent {
       },
       agentInfo: {
         name: "agy-agent-acp",
-        version: "0.1.4",
+        version: "0.1.6",
       },
     } as unknown as InitializeResponse;
   }
@@ -211,6 +251,40 @@ export class AgyAcpAgent {
     this.logger?.log(`[AgyAcpAgent] Sending prompt to agy (length: ${fullPrompt.length})`);
 
     const params = { sessionId };
+    const metrics = await this.getMetrics();
+    const startedAt = performance.now();
+    let lastUsage: AgyUsage | undefined;
+    try {
+      const stopReason = await this.sendToAgy(session, fullPrompt, params.sessionId, (usage) => {
+        lastUsage = usage;
+      });
+      this.recordRun(metrics, {
+        outcome: stopReason === "cancelled" ? "cancelled" : "ok",
+        durationSeconds: (performance.now() - startedAt) / 1000,
+        usage: lastUsage,
+      });
+      return stopReason;
+    } catch (err) {
+      this.recordRun(metrics, {
+        // a run that ends in an error after a cancel is the cancel's, as prompt() reports it
+        outcome: session.cancelRequested ? "cancelled" : "error",
+        durationSeconds: (performance.now() - startedAt) / 1000,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        failureKind: err instanceof AgyRunError ? err.kind : "error",
+        usage: lastUsage,
+      });
+      throw err;
+    }
+  }
+
+  /** The run itself, unchanged from 0.1.4 but for the usage it reports to onRunUsage. */
+  private sendToAgy(
+    session: SessionData,
+    fullPrompt: string,
+    sessionId: string,
+    onRunUsage: (usage: AgyUsage) => void
+  ): Promise<string> {
+    const params = { sessionId };
     return session.process.sendPrompt(fullPrompt, {
       onTextDelta: async (text: string): Promise<void> => {
         await this.client.notify(methods.client.session.update, {
@@ -237,6 +311,7 @@ export class AgyAcpAgent {
         } as unknown as Parameters<AgentContext["notify"]>[1]);
       },
       onUsage: async (usage): Promise<void> => {
+        onRunUsage(usage);
         await this.client.notify(methods.client.session.update, {
           sessionId: params.sessionId,
           update: {
@@ -281,6 +356,7 @@ export class AgyAcpAgent {
       session.process.dispose();
     }
     this.sessions.clear();
+    await this.metrics?.shutdown();
   }
 }
 
