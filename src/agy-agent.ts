@@ -21,6 +21,8 @@ import * as fs from "node:fs";
 import { AgyProcess, AgyRunError, ToolCallEvent, ToolResultEvent } from "./agy-process.js";
 import { getPackageVersion, Logger, nodeToWebReadable, nodeToWebWritable, sleep } from "./utils.js";
 import { initTelemetry, parseNostrContext, TelemetryEngine } from "./telemetry.js";
+import { initMetrics, MetricsService, RunRecord } from "./metrics.js";
+import type { AgyUsage } from "./agy-process.js";
 
 interface SessionData {
   sessionId: string;
@@ -63,10 +65,34 @@ export class AgyAcpAgent {
   private sessions = new Map<string, SessionData>();
   private telemetry?: TelemetryEngine;
   private telemetryInitPromise?: Promise<TelemetryEngine | undefined>;
+  private metrics?: MetricsService;
+  private metricsInitPromise?: Promise<MetricsService | undefined>;
 
-  constructor(client: AgentContext, logger?: Logger) {
+  /** `options.metrics` replaces the env-built metrics (tests); null turns them off. */
+  constructor(client: AgentContext, logger?: Logger, options: { metrics?: MetricsService | null } = {}) {
     this.client = client;
     this.logger = logger;
+    if (options.metrics !== undefined) {
+      this.metrics = options.metrics ?? undefined;
+      this.metricsInitPromise = Promise.resolve(this.metrics);
+    }
+  }
+
+  /** Run metrics (src/metrics.ts): built once from the env, undefined when off or when they could not start. */
+  private async getMetrics(): Promise<MetricsService | undefined> {
+    if (!this.metricsInitPromise) {
+      this.metricsInitPromise = initMetrics(this.logger)
+        .then((m) => {
+          this.metrics = m ?? undefined;
+          return this.metrics;
+        })
+        .catch((err) => {
+          this.logger?.error("[AgyAcpAgent] Metrics init exception caught, running without metrics:", err);
+          this.metrics = undefined;
+          return undefined;
+        });
+    }
+    return this.metricsInitPromise;
   }
 
   private async getTelemetry(): Promise<TelemetryEngine | undefined> {
@@ -89,6 +115,7 @@ export class AgyAcpAgent {
   public async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.logger?.log("[AgyAcpAgent] Initialize called with params:", params);
     this.telemetry = await this.getTelemetry();
+    await this.getMetrics();
     const version = getPackageVersion();
     return {
       protocolVersion: 2,
@@ -235,6 +262,9 @@ export class AgyAcpAgent {
     const nostrMeta = parseNostrContext(rawText);
     const telemetry = await this.getTelemetry();
     const turnHandle = telemetry?.startTurnSpan(sessionId, fullPrompt, process.env.AGY_MODEL, nostrMeta);
+    const metrics = await this.getMetrics();
+    const startedAt = performance.now();
+    let lastUsage: AgyUsage | undefined;
     let assistantResponseText = "";
 
     const params = { sessionId };
@@ -271,6 +301,7 @@ export class AgyAcpAgent {
           turnHandle?.endToolSpan(event.stepIndex, event.toolName, event.output, event.error);
         },
         onUsage: async (usage): Promise<void> => {
+          lastUsage = usage;
           turnHandle?.recordUsage(usage);
           await this.client.notify(methods.client.session.update, {
             sessionId: params.sessionId,
@@ -294,13 +325,39 @@ export class AgyAcpAgent {
         turnHandle?.end("OK", assistantResponseText);
       }
       telemetry?.backgroundFlush(1000);
+      this.recordRun(metrics, {
+        outcome: stopReason === "cancelled" ? "cancelled" : "ok",
+        durationSeconds: (performance.now() - startedAt) / 1000,
+        usage: lastUsage,
+      });
       return stopReason;
     } catch (err: unknown) {
       const failureKind = err instanceof AgyRunError ? err.kind : "error";
       const failureMessage = err instanceof Error ? err.message : String(err);
       turnHandle?.end("ERROR", undefined, failureKind, failureMessage);
       telemetry?.backgroundFlush(1000);
+      this.recordRun(metrics, {
+        // a run that ends in an error after a cancel is the cancel's, as prompt() reports it
+        outcome: session.cancelRequested ? "cancelled" : "error",
+        durationSeconds: (performance.now() - startedAt) / 1000,
+        errorMessage: failureMessage,
+        failureKind,
+        usage: lastUsage,
+      });
       throw err;
+    }
+  }
+
+  /** Records a run and exports it now, in the background: metrics never fail, delay or change a turn. */
+  private recordRun(metrics: MetricsService | undefined, run: RunRecord): void {
+    if (!metrics) {
+      return;
+    }
+    try {
+      metrics.recordRun(run);
+      void metrics.flush().catch(() => {});
+    } catch (err) {
+      this.logger?.error(`[AgyAcpAgent] Could not record run metrics: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -333,7 +390,7 @@ export class AgyAcpAgent {
       session.process.dispose();
     }
     this.sessions.clear();
-    await this.telemetry?.shutdown();
+    await Promise.all([this.telemetry?.shutdown(), this.metrics?.shutdown()]);
   }
 }
 
