@@ -8,14 +8,18 @@ on:
         required: false
         type: boolean
         default: false
+  # support/<line>.x (support/0.1.x, cut from v0.1.4) keeps an older line alive. It is built and tested like master,
+  # and it publishes under its own dist-tag, never `latest` (the publish job's "Choose the npm dist-tag").
   push:
     branches:
       - master
       - main
+      - "support/**"
   pull_request:
     branches:
       - master
       - main
+      - "support/**"
 
 permissions:
   contents: read
@@ -61,8 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: ci
     if: |
-      (github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')) ||
-      (github.event_name == 'workflow_dispatch' && inputs.publish == true && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'))
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)) &&
+      (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/support/'))
     permissions:
       contents: read
       id-token: write
@@ -75,6 +79,36 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+
+      # `latest` stays on the newest line. support/0.1.x publishes 0.1.* under latest-0.1
+      # (npm install agy-agent-acp@latest-0.1), and refuses a package.json version from another line.
+      - name: Choose the npm dist-tag
+        id: dist_tag
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          case "${GITHUB_REF}" in
+            refs/heads/master | refs/heads/main)
+              tag=latest
+              ;;
+            refs/heads/support/*)
+              line="${GITHUB_REF#refs/heads/support/}"
+              line="${line%.x}"
+              case "${version}" in
+                "${line}".*) ;;
+                *)
+                  echo "::error::package.json has ${version}, which is not on the ${line} line of ${GITHUB_REF#refs/heads/}"
+                  exit 1
+                  ;;
+              esac
+              tag="latest-${line}"
+              ;;
+            *)
+              echo "::error::no npm dist-tag for ${GITHUB_REF}"
+              exit 1
+              ;;
+          esac
+          echo "Publishing ${version} under the dist-tag ${tag}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: npm ci
@@ -96,4 +130,6 @@ jobs:
 
       - name: Publish
         if: steps.publish_check.outputs.should_publish == 'true'
-        run: npm publish --provenance --access public
+        env:
+          DIST_TAG: ${{ steps.dist_tag.outputs.tag }}
+        run: npm publish --provenance --access public --tag "${DIST_TAG}"
