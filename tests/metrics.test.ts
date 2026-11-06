@@ -146,6 +146,25 @@ describe("initMetrics", () => {
     await m.shutdown();
   });
 
+  it("starts every token series at 0 before any run, so the receiver counts the first run's tokens", async () => {
+    // MetricsQL's increase() takes a new series' first sample as growth from 0 only when it is small next to the
+    // following step (VictoriaMetrics rollupDelta): a first sample of 9000 tokens would be dropped, a first 0 is not.
+    const { exporter, m } = await service(ENV);
+    await m.flush();
+    const tokens = collect(exporter).get("agy_tokens_total")!;
+    expect(Object.fromEntries(tokens.map((t) => [t.attributes.type, t.value]))).toEqual({
+      input: 0,
+      output: 0,
+      cache_read: 0,
+      thinking: 0,
+    });
+    for (const t of tokens) {
+      expect(t.attributes).toEqual({ ...BASE, type: t.attributes.type });
+    }
+    expect(collect(exporter).get("agy_runs_total")).toBeUndefined();
+    await m.shutdown();
+  });
+
   it("never throws into a turn when the exporter cannot reach the endpoint", async () => {
     process.env = { ...saved, ...ENV, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://127.0.0.1:9/opentelemetry/v1/metrics" };
     const errors: unknown[] = [];

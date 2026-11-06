@@ -133,6 +133,8 @@ export interface MetricsService {
   shutdown(): Promise<void>;
 }
 
+const TOKEN_TYPES = ["input", "output", "cache_read", "thinking"] as const;
+
 /** Seconds: a run spans a one-line answer to an hour-long brainstorm turn. */
 const DURATION_BUCKETS = [1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200];
 
@@ -205,6 +207,12 @@ export async function initMetrics(logger?: Logger, options: MetricsOptions = {})
     });
     const tokens = meter.createCounter("agy_tokens_total", { description: "Tokens an agy run reported, by type" });
     const base = metricLabels();
+    // Each token series starts at 0: MetricsQL's increase() reads a new series' first sample as growth from 0 only when
+    // it is small next to the following step, so a first sample of thousands of tokens would be lost. A run counter's
+    // first sample is a handful of runs, which it counts.
+    for (const type of TOKEN_TYPES) {
+      tokens.add(0, { ...base, type });
+    }
 
     // The OTLP exporter retries a failed export with backoff until its own timeout: a flush waits at most timeoutMs, and
     // the export, if still running, carries on (or is dropped) in the background.
@@ -224,7 +232,7 @@ export async function initMetrics(logger?: Logger, options: MetricsOptions = {})
           durations.record(Math.max(0, run.durationSeconds), { ...base, outcome: run.outcome });
           const u = run.usage;
           if (u) {
-            const byType: Array<[string, number | undefined]> = [
+            const byType: Array<[(typeof TOKEN_TYPES)[number], number | undefined]> = [
               ["input", u.input_tokens],
               ["output", u.output_tokens],
               ["cache_read", u.cache_read_tokens],
